@@ -1,0 +1,13 @@
+name: graphland-pyg
+dependencies:
+  - python=3.11
+  - pip
+  - pyyaml
+  - numpy=1.26
+  - pandas=2.2
+  - scikit-learn=1.5
+  - mkl=2023.1
+  - pip:
+      - torch
+      - torch_geometric
+      - ogb

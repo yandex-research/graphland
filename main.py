@@ -17,7 +17,6 @@ def main():
 
     dataset = Dataset(name=args.dataset,
                       split=args.split,
-                      transductive=args.transductive,
                       add_self_loops=(args.model in ['GCN', 'GAT', 'GT']),
                       node_embeddings=args.node_embeddings,
                       device=args.device)

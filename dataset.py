@@ -4,9 +4,9 @@ from functools import partial
 
 import numpy as np
 import pandas as pd
+
 import torch
 from torch.nn import functional as F
-import dgl
 
 from sklearn.preprocessing import (FunctionTransformer, StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer,
                                    QuantileTransformer, OneHotEncoder)
@@ -14,8 +14,20 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import average_precision_score, r2_score
 from sklearn.model_selection import train_test_split
 
-from torch_geometric import datasets as pyg_datasets
-from ogb.nodeproppred import NodePropPredDataset
+try:
+    import dgl
+except ImportError:
+    pass
+
+try:
+    import torch_geometric as pyg
+except ImportError:
+    pass
+
+try:
+    from ogb.nodeproppred import NodePropPredDataset
+except ImportError:
+    pass
 
 
 class Dataset:
@@ -64,37 +76,54 @@ class Dataset:
                                               random_state=0, copy=False)
     }
 
-    def __init__(self, name, split=None, transductive=True, add_self_loops=False, node_embeddings=None,
-                 regression_targets_transform='none', numerical_features_transform='none',
-                 fraction_features_transform='none', numerical_features_nan_imputation_strategy='most_frequent',
-                 fraction_features_nan_imputation_strategy='most_frequent', device='cpu'):
+    def __init__(self, name, split='RL', add_self_loops=False, to_undirected=True, node_embeddings=None,
+                 regression_targets_transform='default', numerical_features_transform='default',
+                 fraction_features_transform='default', numerical_features_nan_imputation_strategy='default',
+                 fraction_features_nan_imputation_strategy='default', device='cpu', use_pyg=False):
         print('Preparing data...')
+
+        if split in ['TH', 'THI'] and name in ['city-reviews', 'city-roads-M', 'city-roads-L', 'web-traffic']:
+            raise ValueError(f'{split} split is not available for {name} dataset.')
+
+        if name in self.graphland_datasets_names:
+            if split == 'THI':
+                transductive = False
+                split = 'TH'
+            else:
+                transductive = True
+
+        else:
+            transductive = True
+            split = 'default'
+
         if name in self.graphland_datasets_names:
             if transductive:
                 (graph, features, targets, train_mask, val_mask, test_mask,
-                 numerical_features_mask, fraction_features_mask) = \
+                 numerical_features_mask, fraction_features_mask, categorical_features_mask) = \
                     self.get_graphland_transductive_dataset(name=name, split=split, add_self_loops=add_self_loops,
-                                                            node_embeddings_name=node_embeddings)
+                                                            to_undirected=to_undirected,
+                                                            node_embeddings_name=node_embeddings, use_pyg=use_pyg)
 
             else:
-                (train_graph, train_features, train_targets, train_mask,
-                 val_graph, val_features, val_targets, val_mask,
-                 test_graph, test_features, test_targets, test_mask,
-                 numerical_features_mask, fraction_features_mask) = \
+                (train_graph, train_features, train_targets, train_mask, train_node_ids_in_full_graph,
+                 val_graph, val_features, val_targets, val_mask, val_node_ids_in_full_graph,
+                 test_graph, test_features, test_targets, test_mask, test_node_ids_in_full_graph,
+                 numerical_features_mask, fraction_features_mask, categorical_features_mask) = \
                     self.get_graphland_inductive_dataset(name=name, split=split, add_self_loops=add_self_loops,
-                                                         node_embeddings_name=node_embeddings)
+                                                         to_undirected=to_undirected,
+                                                         node_embeddings_name=node_embeddings, use_pyg=use_pyg)
 
         elif name in self.pyg_datasets_names:
             graph, features, targets, train_mask, val_mask, test_mask = self.get_pyg_dataset(
-                name=name, add_self_loops=add_self_loops
+                name=name, add_self_loops=add_self_loops, to_undirected=to_undirected, use_pyg=use_pyg
             )
-            numerical_features_mask, fraction_features_mask = None, None
+            numerical_features_mask, fraction_features_mask, categorical_features_mask = None, None, None
 
         elif name in self.ogb_datasets_names:
             graph, features, targets, train_mask, val_mask, test_mask = self.get_ogb_dataset(
-                name=name, add_self_loops=add_self_loops
+                name=name, add_self_loops=add_self_loops, to_undirected=to_undirected, use_pyg=use_pyg
             )
-            numerical_features_mask, fraction_features_mask = None, None
+            numerical_features_mask, fraction_features_mask, categorical_features_mask = None, None, None
 
         else:
             raise ValueError(f'Unkown dataset name: {name}.')
@@ -134,10 +163,11 @@ class Dataset:
             raise RuntimeError(f'The task for dataset {name} is not known.')
 
         self.name = name
+        self.split = split
+        self.transductive = transductive
         self.task = task
         self.metric_name = metric_name
         self.loss_fn = loss_fn
-        self.transductive = transductive
         self.device = device
 
         if transductive:
@@ -153,16 +183,19 @@ class Dataset:
             self.train_features = train_features.to(device)
             self.train_targets = train_targets.to(device)
             self.train_mask = train_mask.to(device)
+            self.train_node_ids_in_full_graph = train_node_ids_in_full_graph.to(device)
 
             self.val_graph = val_graph.to(device)
             self.val_features = val_features.to(device)
             self.val_targets = val_targets.to(device)
             self.val_mask = val_mask.to(device)
+            self.val_node_ids_in_full_graph = val_node_ids_in_full_graph.to(device)
 
             self.test_graph = test_graph.to(device)
             self.test_features = test_features.to(device)
             self.test_targets = test_targets.to(device)
             self.test_mask = test_mask.to(device)
+            self.test_node_ids_in_full_graph = test_node_ids_in_full_graph.to(device)
 
         self.features_dim = features.shape[1] if transductive else train_features.shape[1]
         self.targets_dim = targets_dim
@@ -202,6 +235,28 @@ class Dataset:
                 self.train_fraction_features_orig = train_features[:, fraction_features_mask].clone().numpy()
                 self.val_fraction_features_orig = val_features[:, fraction_features_mask].clone().numpy()
                 self.test_fraction_features_orig = test_features[:, fraction_features_mask].clone().numpy()
+
+        if categorical_features_mask is None:
+            self.categorical_features_mask = None
+        else:
+            self.categorical_features_mask = categorical_features_mask.to(device)
+
+        if regression_targets_transform == 'default':
+            regression_targets_transform = 'standard-scaler'
+
+        if numerical_features_transform == 'default':
+            numerical_features_transform = 'quantile-transform-normal'
+
+        if fraction_features_transform == 'default':
+            fraction_features_transform = (
+                'quantile-transform-normal' if name in ['avazu-ctr', 'artnet-views'] else 'none'
+            )
+
+        if numerical_features_nan_imputation_strategy == 'default':
+            numerical_features_nan_imputation_strategy = 'most-frequent'
+
+        if fraction_features_nan_imputation_strategy == 'default':
+            fraction_features_nan_imputation_strategy = 'most-frequent'
 
         self.apply_transforms(regression_targets_transform_name=regression_targets_transform,
                               numerical_features_transform_name=numerical_features_transform,
@@ -271,7 +326,7 @@ class Dataset:
 
     def transform_features(self, features_type, transform_name, nan_imputation_strategy):
         transform = self.transforms[transform_name]()
-        imputer = SimpleImputer(missing_values=np.nan, strategy=nan_imputation_strategy, copy=False)
+        imputer = SimpleImputer(missing_values=np.nan, strategy=nan_imputation_strategy.replace('-', '_'), copy=False)
 
         if features_type == 'numerical':
             mask = self.numerical_features_mask
@@ -425,7 +480,8 @@ class Dataset:
         return test_metric
 
     @staticmethod
-    def get_graphland_transductive_dataset(name, split, add_self_loops, node_embeddings_name):
+    def get_graphland_transductive_dataset(name, split, add_self_loops, to_undirected=True, node_embeddings_name=None,
+                                           use_pyg=False):
         with open(f'data/{name}/info.yaml', 'r') as file:
             info = yaml.safe_load(file)
 
@@ -463,6 +519,15 @@ class Dataset:
         else:
             fraction_features_mask = None
 
+        if categorical_features.shape[1] > 0:
+            categorical_features_mask = np.zeros(features.shape[1], dtype=bool)
+            categorical_features_mask[
+                numerical_features.shape[1] + fraction_features.shape[1]:
+                numerical_features.shape[1] + fraction_features.shape[1] + categorical_features.shape[1]
+            ] = True
+        else:
+            categorical_features_mask = None
+
         targets = pd.read_csv(f'data/{name}/targets.csv', index_col=0).values.squeeze(1).astype(np.float32)
 
         edges_df = pd.read_csv(f'data/{name}/edgelist.csv')
@@ -478,7 +543,8 @@ class Dataset:
         val_mask = (val_mask_orig & labeled_mask)
         test_mask = (test_mask_orig & labeled_mask)
 
-        graph = Dataset.get_graph(edges=edges, num_nodes=len(features), add_self_loops=add_self_loops)
+        graph = Dataset.get_graph(edges=edges, num_nodes=len(features), add_self_loops=add_self_loops,
+                                  to_undirected=to_undirected, use_pyg=use_pyg)
 
         features = torch.tensor(features)
         targets = torch.tensor(targets)
@@ -492,12 +558,17 @@ class Dataset:
         if fraction_features_mask is not None:
             fraction_features_mask = torch.tensor(fraction_features_mask)
 
+        if categorical_features_mask is not None:
+            categorical_features_mask = torch.tensor(categorical_features_mask)
+
         return (
-            graph, features, targets, train_mask, val_mask, test_mask, numerical_features_mask, fraction_features_mask
+            graph, features, targets, train_mask, val_mask, test_mask,
+            numerical_features_mask, fraction_features_mask, categorical_features_mask
         )
 
     @staticmethod
-    def get_graphland_inductive_dataset(name, split, add_self_loops, node_embeddings_name):
+    def get_graphland_inductive_dataset(name, split, add_self_loops, to_undirected=True, node_embeddings_name=None,
+                                        use_pyg=False):
         with open(f'data/{name}/info.yaml', 'r') as file:
             info = yaml.safe_load(file)
 
@@ -542,7 +613,18 @@ class Dataset:
         else:
             fraction_features_mask = None
 
+        if categorical_features.shape[1] > 0:
+            categorical_features_mask = np.zeros(features.shape[1], dtype=bool)
+            categorical_features_mask[
+                numerical_features.shape[1] + fraction_features.shape[1]:
+                numerical_features.shape[1] + fraction_features.shape[1] + categorical_features.shape[1]
+            ] = True
+        else:
+            categorical_features_mask = None
+
         targets = pd.read_csv(f'data/{name}/targets.csv', index_col=0).values.squeeze(1).astype(np.float32)
+
+        node_ids_in_full_graph = np.arange(len(features))
 
         edges_df = pd.read_csv(f'data/{name}/edgelist.csv')
         edges = edges_df.values[:, :2]
@@ -552,35 +634,44 @@ class Dataset:
         train_edges = Dataset.get_induced_subgraph_edges(edges=edges, nodes_to_keep=np.where(train_mask_orig)[0])
         train_features = features[train_mask_orig]
         train_targets = targets[train_mask_orig]
+        train_node_ids_in_full_graph = node_ids_in_full_graph[train_mask_orig]
 
         val_edges = Dataset.get_induced_subgraph_edges(edges=edges, nodes_to_keep=np.where(train_and_val_mask_orig)[0])
         val_features = features[train_and_val_mask_orig]
         val_targets = targets[train_and_val_mask_orig]
+        val_node_ids_in_full_graph = node_ids_in_full_graph[train_and_val_mask_orig]
 
         test_edges = edges
         test_features = features
         test_targets = targets
+        test_node_ids_in_full_graph = node_ids_in_full_graph
 
         labeled_mask = ~np.isnan(targets)
         train_mask = labeled_mask[train_mask_orig]
         val_mask = (val_mask_orig & labeled_mask)[train_and_val_mask_orig]
         test_mask = (test_mask_orig & labeled_mask)
 
-        train_graph = Dataset.get_graph(edges=train_edges, num_nodes=len(train_features), add_self_loops=add_self_loops)
-        val_graph = Dataset.get_graph(edges=val_edges, num_nodes=len(val_features), add_self_loops=add_self_loops)
-        test_graph = Dataset.get_graph(edges=test_edges, num_nodes=len(test_features), add_self_loops=add_self_loops)
+        train_graph = Dataset.get_graph(edges=train_edges, num_nodes=len(train_features), add_self_loops=add_self_loops,
+                                        to_undirected=to_undirected, use_pyg=use_pyg)
+        val_graph = Dataset.get_graph(edges=val_edges, num_nodes=len(val_features), add_self_loops=add_self_loops,
+                                      to_undirected=to_undirected, use_pyg=use_pyg)
+        test_graph = Dataset.get_graph(edges=test_edges, num_nodes=len(test_features), add_self_loops=add_self_loops,
+                                       to_undirected=to_undirected, use_pyg=use_pyg)
 
         train_features = torch.tensor(train_features)
         train_targets = torch.tensor(train_targets)
         train_mask = torch.tensor(train_mask)
+        train_node_ids_in_full_graph = torch.tensor(train_node_ids_in_full_graph)
 
         val_features = torch.tensor(val_features)
         val_targets = torch.tensor(val_targets)
         val_mask = torch.tensor(val_mask)
+        val_node_ids_in_full_graph = torch.tensor(val_node_ids_in_full_graph)
 
         test_features = torch.tensor(test_features)
         test_targets = torch.tensor(test_targets)
         test_mask = torch.tensor(test_mask)
+        test_node_ids_in_full_graph = torch.tensor(test_node_ids_in_full_graph)
 
         if numerical_features_mask is not None:
             numerical_features_mask = torch.tensor(numerical_features_mask)
@@ -588,31 +679,34 @@ class Dataset:
         if fraction_features_mask is not None:
             fraction_features_mask = torch.tensor(fraction_features_mask)
 
+        if categorical_features_mask is not None:
+            categorical_features_mask = torch.tensor(categorical_features_mask)
+
         return (
-            train_graph, train_features, train_targets, train_mask,
-            val_graph, val_features, val_targets, val_mask,
-            test_graph, test_features, test_targets, test_mask,
-            numerical_features_mask, fraction_features_mask
+            train_graph, train_features, train_targets, train_mask, train_node_ids_in_full_graph,
+            val_graph, val_features, val_targets, val_mask, val_node_ids_in_full_graph,
+            test_graph, test_features, test_targets, test_mask, test_node_ids_in_full_graph,
+            numerical_features_mask, fraction_features_mask, categorical_features_mask
         )
 
     @staticmethod
-    def get_pyg_dataset(name, add_self_loops):
+    def get_pyg_dataset(name, add_self_loops, to_undirected=True, use_pyg=False):
         if name in ['roman-empire', 'amazon-ratings', 'minesweeper', 'tolokers', 'questions']:
-            dataset = pyg_datasets.HeterophilousGraphDataset(name=name, root='data')
+            dataset = pyg.datasets.HeterophilousGraphDataset(name=name, root='data')
         elif name in ['cora', 'citeseer', 'pubmed']:
-            dataset = pyg_datasets.Planetoid(name=name, root='data')
+            dataset = pyg.datasets.Planetoid(name=name, root='data')
         elif name in ['coauthor-cs', 'coauthor-physics']:
-            dataset = pyg_datasets.Coauthor(name=name.split('-')[1], root=os.path.join('data', 'coauthor'))
+            dataset = pyg.datasets.Coauthor(name=name.split('-')[1], root=os.path.join('data', 'coauthor'))
         elif name in ['amazon-computers', 'amazon-photo']:
-            dataset = pyg_datasets.Amazon(name=name.split('-')[1], root=os.path.join('data', 'amazon'))
+            dataset = pyg.datasets.Amazon(name=name.split('-')[1], root=os.path.join('data', 'amazon'))
         elif name == 'lastfm-asia':
-            dataset = pyg_datasets.LastFMAsia(root=os.path.join('data', name))
+            dataset = pyg.datasets.LastFMAsia(root=os.path.join('data', name))
         elif name == 'facebook':
-            dataset = pyg_datasets.FacebookPagePage(root=os.path.join('data', name))
+            dataset = pyg.datasets.FacebookPagePage(root=os.path.join('data', name))
         elif name == 'wiki-cs':
-            dataset = pyg_datasets.WikiCS(root=os.path.join('data', name), is_undirected=True)
+            dataset = pyg.datasets.WikiCS(root=os.path.join('data', name), is_undirected=True)
         elif name == 'flickr':
-            dataset = pyg_datasets.Flickr(root=os.path.join('data', name))
+            dataset = pyg.datasets.Flickr(root=os.path.join('data', name))
         else:
             raise ValueError(f'Unknown PyG dataset name: {name}.')
 
@@ -621,7 +715,8 @@ class Dataset:
         targets = pyg_data.y
         num_nodes = len(features)
         edges = pyg_data.edge_index.T
-        graph = Dataset.get_graph(edges=edges, num_nodes=num_nodes, add_self_loops=add_self_loops)
+        graph = Dataset.get_graph(edges=edges, num_nodes=num_nodes, add_self_loops=add_self_loops,
+                                  to_undirected=to_undirected, use_pyg=use_pyg)
 
         # Get data splits.
         if name in Dataset.pyg_datasets_with_predefined_splits_names:
@@ -656,13 +751,14 @@ class Dataset:
         return graph, features, targets, train_mask, val_mask, test_mask
 
     @staticmethod
-    def get_ogb_dataset(name, add_self_loops):
+    def get_ogb_dataset(name, add_self_loops, to_undirected=True, use_pyg=False):
         dataset = NodePropPredDataset(name=name, root='data')
         data, targets = dataset[0]
         targets = torch.tensor(targets.squeeze(1))
         features = torch.tensor(data['node_feat'])
         edges = data['edge_index'].T
-        graph = Dataset.get_graph(edges=edges, num_nodes=len(features), add_self_loops=add_self_loops)
+        graph = Dataset.get_graph(edges=edges, num_nodes=len(features), add_self_loops=add_self_loops,
+                                  to_undirected=to_undirected, use_pyg=use_pyg)
 
         split = dataset.get_idx_split()
         train_idx = split['train']
@@ -681,17 +777,48 @@ class Dataset:
         return graph, features, targets, train_mask, val_mask, test_mask
 
     @staticmethod
-    def get_graph(edges, num_nodes, add_self_loops):
+    def get_graph(edges, num_nodes, add_self_loops, to_undirected=True, use_pyg=False):
+        if not use_pyg:
+            graph = Dataset.get_dgl_graph(edges=edges, num_nodes=num_nodes, add_self_loops=add_self_loops,
+                                          to_undirected=to_undirected)
+
+        else:
+            graph = Dataset.get_pyg_edge_index(edges=edges, num_nodes=num_nodes, add_self_loops=add_self_loops,
+                                               to_undirected=to_undirected)
+
+        return graph
+
+    @staticmethod
+    def get_dgl_graph(edges, num_nodes, add_self_loops, to_undirected=True):
         graph = dgl.graph((edges[:, 0], edges[:, 1]), num_nodes=num_nodes, idtype=torch.int32)
 
         graph = dgl.remove_self_loop(graph)
         graph = dgl.to_simple(graph)
-        graph = dgl.to_bidirected(graph)
+
+        if to_undirected:
+            graph = dgl.to_bidirected(graph)
 
         if add_self_loops:
             graph = dgl.add_self_loop(graph)
 
         return graph
+
+    @staticmethod
+    def get_pyg_edge_index(edges, num_nodes, add_self_loops, to_undirected=True):
+        edge_index = torch.tensor(edges.T)
+
+        edge_index = pyg.utils.remove_self_loops(edge_index)[0]
+        edge_index = pyg.transforms.RemoveDuplicatedEdges()(
+            pyg.data.Data(num_nodes=num_nodes, edge_index=edge_index)
+        ).edge_index
+
+        if to_undirected:
+            edge_index = pyg.utils.to_undirected(edge_index)
+
+        if add_self_loops:
+            edge_index = pyg.utils.add_self_loops(edge_index)
+
+        return edge_index
 
     @staticmethod
     def get_induced_subgraph_edges(edges, nodes_to_keep):
@@ -707,3 +834,161 @@ class Dataset:
         ])
 
         return edges
+
+
+class PyGDataset:
+    """
+    This class provides access to GraphLand datasets in a format similar to PyG dataset.
+
+    Args:
+        name (str):
+            Dataset name. One of: 'hm-categories', 'pokec-regions', 'web-topics', 'tolokers-2', 'city-reviews',
+            'artnet-exp', 'web-fraud', 'hm-prices', 'avazu-ctr', 'city-roads-M', 'city-roads-L', 'twitch-views',
+            'artnet-views', 'web-traffic'.
+
+        split (str, default: 'RL'):
+            The type of dataset split/setting. One of: 'RL', 'RH', 'TH', 'THI'.
+            'RL' is for 'random low' split — a 10%/10%/80% random stratified train/val/test split.
+            'RH' is for 'random high' split — a 50%/25%/25% random stratified train/val/test split.
+            'TH' is for 'temporal high' split — a 50%/25%/25% temporal train/val/test split.
+            'THI' is for 'temporal high' split with the inductive setting, which means that the graph is evolving over
+            time, thus val and test nodes are not seen at train time, and test nodes are not seen at val time.
+            'RL', 'RH', and 'TH' splits correspond to the transductive setting, and thus will return a dataset with
+            a single graph and three masks (for train, val, and test nodes).
+            In contrast, 'THI' corresponds to the inductive setting, and thus will return a dataset with 3 graphs
+            (a train graph, a val graph, and a test graph), which are 3 snapshots of an evolving network captured
+            at different timestamps. Each of the three graphs has a mask specifying which of the nodes should be used
+            for training (in the train graph) and evaluation (in the val and test graphs).
+            'TH' and 'THI' splits are not available for the following datasets: 'city-reviews', 'city-roads-M',
+            'city-roads-L', 'web-traffic'.
+
+        to_undirected (bool, default: True):
+            Whether to convert a directed graph to an undirected one. Does not affect undirected graphs. The following
+            datasets have directed graphs: 'pokec-regions', 'web-topics', 'web-fraud', 'city-roads-M', 'city-roads-L',
+            'web-traffic'.
+
+        add_self_loops (bool, default: False):
+            Whether to add a self-loop to each node in the graph.
+
+        numerical_features_transform (str, default: 'default'):
+            A transform applied to numerical features. One of: 'none', 'standard-scaler', 'min-max-scaler',
+            'quantile-transform-normal', 'quantile-transform-uniform', 'default'.
+            Since numerical features can have widely different scales and distributions, it is typically useful to
+            apply some transform to them before passing them to a neural model. This transform is applied to all
+            numerical features except for those that are also categorized as fraction features. The 'default' value
+            selects a transform from the other options that was determined to be a safe and likely optimal choice for
+            this dataset based on experiments with various GNNs.
+
+        fraction_features_transform (str, default: 'default'):
+            A transform applied to fraction features. One of: 'none', 'standard-scaler', 'min-max-scaler',
+            'quantile-transform-normal', 'quantile-transform-uniform', 'default'. Fraction features are a subset of
+            numerical features that have the meaning of fractions and are thus always in the [0, 1] range. Since
+            their range is bounded, it is not neccessary but may still be useful to apply some transform to them before
+            passing them to a neural model. The 'default' value selects a transform from the other options that was
+            determined to be a safe and likely optimal choice for this dataset based on experiments with various GNNs.
+
+        regression_targets_transform (str, default: 'default'):
+            A transform applied to regression targets. One of: 'none', 'standard-scaler', 'min-max-scaler',
+            'quantile-transform-normal', 'quantile-transform-uniform', 'default'. Depending on their range, it may or
+            may not be useful to apply a transform to regression targets before fitting a neural model to them.
+            The `default` value selects a transform from the other options that was determined to be a safe and likely
+            optimal choice for this dataset based on experiments with various GNNs. This argument does not affect
+            classification datasets.
+
+        numerical_features_nan_imputation_strategy (str, default: 'default'):
+            Defines which value to fill NaNs in numerical features with. One of: 'mean', 'median', 'most-frequent',
+            'default'.
+            This imputation strategy is applied to all numerical features except for those that are also categorized
+            as fraction features. The 'default' value is the same as 'most-frequent'.
+
+        fraction_features_nan_imputation_strategy (str, default: 'default'):
+            Defines which value to fill NaNs in fraction features with. One of: 'mean', 'median', 'most-frequent',
+            'default'.
+            The 'default' value is the same as 'most-frequent'.
+
+        device (str, default: 'cpu'):
+            Which device to put tensors on. Possible values are strigns that can be converted to a device by PyTorch,
+            e.g., 'cpu', 'cuda', 'cuda:0', 'cuda:1'.
+    """
+    def __init__(self, name, split='RL', to_undirected=True, add_self_loops=False,
+                 numerical_features_transform='default', fraction_features_transform='default',
+                 regression_targets_transform='default', numerical_features_nan_imputation_strategy='default',
+                 fraction_features_nan_imputation_strategy='default', device='cpu'):
+
+        dataset = Dataset(name=name,
+                          split=split,
+                          add_self_loops=add_self_loops,
+                          to_undirected=to_undirected,
+                          node_embeddings=None,
+                          regression_targets_transform=regression_targets_transform,
+                          numerical_features_transform=numerical_features_transform,
+                          fraction_features_transform=fraction_features_transform,
+                          numerical_features_nan_imputation_strategy=numerical_features_nan_imputation_strategy,
+                          fraction_features_nan_imputation_strategy=fraction_features_nan_imputation_strategy,
+                          device=device,
+                          use_pyg=True)
+
+        num_features = dataset.features.shape[1] if dataset.transductive else dataset.train_features.shape[1]
+
+        if dataset.numerical_features_mask is None:
+            dataset.numerical_features_mask = torch.zeros(num_features, dtype=torch.bool)
+
+        if dataset.fraction_features_mask is None:
+            dataset.fraction_features_mask = torch.zeros(num_features, dtype=torch.bool)
+
+        if dataset.categorical_features_mask is None:
+            dataset.categorical_features_mask = torch.zeros(num_features, dtype=torch.bool)
+
+        if dataset.transductive:
+            data = pyg.data.Data(x=dataset.features, y=dataset.targets, edge_index=dataset.graph,
+                                 train_mask=dataset.train_mask, val_mask=dataset.val_mask, test_mask=dataset.test_mask,
+                                 x_numerical_mask=dataset.numerical_features_mask,
+                                 x_fraction_mask=dataset.fraction_features_mask,
+                                 x_categorical_mask=dataset.categorical_features_mask)
+
+            data_list = [data]
+
+        else:
+            train_data = pyg.data.Data(snapshot='train', x=dataset.train_features, y=dataset.train_targets,
+                                       edge_index=dataset.train_graph, train_mask=dataset.train_mask,
+                                       cross_snapshot_node_ids=dataset.train_node_ids_in_full_graph,
+                                       x_numerical_mask=dataset.numerical_features_mask,
+                                       x_fraction_mask=dataset.fraction_features_mask,
+                                       x_categorical_mask=dataset.categorical_features_mask)
+
+            val_data = pyg.data.Data(snapshot='val', x=dataset.val_features, y=dataset.val_targets,
+                                     edge_index=dataset.val_graph, val_mask=dataset.val_mask,
+                                     cross_snapshot_node_ids=dataset.val_node_ids_in_full_graph,
+                                     x_numerical_mask=dataset.numerical_features_mask,
+                                     x_fraction_mask=dataset.fraction_features_mask,
+                                     x_categorical_mask=dataset.categorical_features_mask)
+
+            test_data = pyg.data.Data(snapshot='test', x=dataset.test_features, y=dataset.test_targets,
+                                      edge_index=dataset.test_graph, test_mask=dataset.test_mask,
+                                      cross_snapshot_node_ids=dataset.test_node_ids_in_full_graph,
+                                      x_numerical_mask=dataset.numerical_features_mask,
+                                      x_fraction_mask=dataset.fraction_features_mask,
+                                      x_categorical_mask=dataset.categorical_features_mask)
+
+            data_list = [train_data, val_data, test_data]
+
+        self.name = dataset.name
+        self.split = dataset.split
+        self.transductive = dataset.transductive
+        self.task = dataset.task
+        self.data_list = data_list
+
+    def __getitem__(self, item):
+        return self.data_list[item]
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}(name={self.name}, split={self.split}, inductive={not self.transductive}, ' \
+               f'task={self.task})'
+
+    def to(self, device):
+        self.data_list = [data.to(device) for data in self.data_list]
+
+        return self

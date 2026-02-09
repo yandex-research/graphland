@@ -19,8 +19,7 @@ class ExperimentConfig:
     name: str = 'experiment'
     save_dir: str = 'experiments'
     dataset: str = 'tolokers-2'
-    split: str = 'RH'
-    transductive: bool = True
+    split: str = 'RL'
     train_regime: str = 'full-graph'
     config: str = None
 
@@ -99,7 +98,6 @@ def get_args():
                             'ogbn-arxiv', 'ogbn-products'
                         ])
     parser.add_argument('--split', type=str, default=None)
-    parser.add_argument('--transductive', type=str_to_bool, default=None)
     parser.add_argument('--train_regime', type=str, default=None, choices=['full-graph', 'minibatch'],
                         help='WIP. Minibatch training regime has not been implemented yet.')
     parser.add_argument('--config', type=str, default=None,
