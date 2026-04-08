@@ -2,7 +2,9 @@
 
 This is the official repository for the paper [GraphLand: Evaluating Graph Machine Learning Models on Diverse Industrial Data](https://arxiv.org/abs/2409.14500) (accepted at NeurIPS 2025 Datasets & Benchmarks track).
 
-> GraphLand datasets are available at [Zenodo](https://zenodo.org/records/16895532) and [Kaggle](https://kaggle.com/datasets/bazhenovgleb/graphland).
+> GraphLand datasets (in their raw form) are available at [Zenodo](https://zenodo.org/records/16895532) and [Kaggle](https://kaggle.com/datasets/bazhenovgleb/graphland).
+
+> **Update**: GraphLand datasets (with the necessary preprocessing code) are now available in [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.datasets.GraphLandDataset.html), which is likely the easiest way to access them.
 
 ## How to use this repository
 
@@ -125,7 +127,7 @@ If you found GraphLand datasets or this repository useful, please cite the follo
 @inproceedings{bazhenov2025graphland,
   title={GraphLand: Evaluating graph machine learning models on diverse industrial data},
   author={Bazhenov, Gleb and Platonov, Oleg and Prokhorenkova, Liudmila},
-  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems Datasets and Benchmarks Track},
+  booktitle={The Thirty-Ninth Annual Conference on Neural Information Processing Systems (Datasets and Benchmarks Track)},
   year={2025}
 }
 ```
